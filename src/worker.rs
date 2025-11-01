@@ -12,7 +12,6 @@ pub struct WorkerConfig {
     pub queue_name: String,
     pub queue_timeout: u64,
     pub allocator_api_url: String,
-    pub hyperlight_path: String,
     pub work_dir: String,
 }
 
@@ -38,7 +37,6 @@ impl Worker {
         let allocator = InstanceAllocator::new(config.allocator_api_url);
 
         let agent_config = AgentConfig {
-            hyperlight_path: config.hyperlight_path,
             working_directory: config.work_dir.clone(),
         };
         let agent_executor = AgentExecutor::new(agent_config);

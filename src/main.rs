@@ -1,5 +1,6 @@
 mod agent;
 mod git;
+mod guest_binary;
 mod instance;
 mod queue;
 mod worker;
@@ -38,14 +39,6 @@ struct Cli {
         default_value = "http://localhost:8080"
     )]
     allocator_api_url: String,
-
-    /// Hyperlight executable path
-    #[arg(
-        long,
-        env = "HYPERLIGHT_PATH",
-        default_value = "/usr/local/bin/hyperlight"
-    )]
-    hyperlight_path: String,
 
     /// Working directory for cloning repositories
     #[arg(long, env = "WORK_DIR", default_value = "/tmp/agent-worker")]
@@ -140,7 +133,6 @@ async fn main() -> Result<()> {
                 queue_name: cli.queue_name,
                 queue_timeout: timeout,
                 allocator_api_url: cli.allocator_api_url,
-                hyperlight_path: cli.hyperlight_path,
                 work_dir: cli.work_dir,
             };
 

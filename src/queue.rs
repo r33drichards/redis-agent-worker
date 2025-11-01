@@ -50,7 +50,7 @@ impl ReliableQueue {
             .brpoplpush(
                 &self.queue_name,
                 &self.processing_queue_name,
-                self.timeout_seconds as usize,
+                self.timeout_seconds as f64,
             )
             .await
             .context("Failed to execute BRPOPLPUSH")?;
@@ -76,7 +76,7 @@ impl ReliableQueue {
             .context("Failed to serialize job")?;
 
         self.connection
-            .lpush(&self.queue_name, &job_json)
+            .lpush::<_, _, ()>(&self.queue_name, &job_json)
             .await
             .context("Failed to enqueue job")?;
 
@@ -119,7 +119,7 @@ impl ReliableQueue {
         if removed > 0 {
             // Re-enqueue to main queue
             self.connection
-                .lpush(&self.queue_name, &job_json)
+                .lpush::<_, _, ()>(&self.queue_name, &job_json)
                 .await
                 .context("Failed to re-enqueue job")?;
 
