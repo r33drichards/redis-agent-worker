@@ -1,0 +1,27 @@
+[Unit]
+Description=Redis Agent Worker
+After=network.target redis.service
+Wants=redis.service
+
+[Service]
+Type=simple
+User=agent-worker
+Group=agent-worker
+WorkingDirectory=/opt/redis-agent-worker
+EnvironmentFile=/opt/redis-agent-worker/.env
+ExecStart=/usr/local/bin/redis-agent-worker run --timeout 30
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=redis-agent-worker
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/tmp/agent-worker
+
+[Install]
+WantedBy=multi-user.target
