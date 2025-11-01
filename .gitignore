@@ -2,7 +2,8 @@
 /target/
 **/*.rs.bk
 *.pdb
-Cargo.lock
+# Note: Cargo.lock should be committed for applications
+# Cargo.lock
 
 # IDE
 .vscode/
@@ -10,6 +11,11 @@ Cargo.lock
 *.swp
 *.swo
 *~
+
+# Nix
+.direnv/
+result
+result-*
 
 # OS
 .DS_Store

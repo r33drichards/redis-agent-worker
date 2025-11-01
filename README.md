@@ -62,13 +62,46 @@ A reliable Redis-based worker system for processing agent jobs with automatic in
 
 ## Prerequisites
 
-- Rust 1.70+
+- Rust 1.70+ OR Nix with flakes enabled (recommended)
 - Redis server
 - Git with SSH key authentication configured
 - Instance allocator service (compatible with `ip-allocator-webserver`)
 - Hyperlight runtime
 
 ## Installation
+
+### Option 1: Using Nix (Recommended)
+
+This project uses Nix flakes for reproducible builds and development environments.
+
+#### Setup Development Environment
+
+```bash
+# Enter the development shell (automatically installs all dependencies)
+nix develop
+
+# Or use direnv for automatic environment loading
+echo "use flake" > .envrc
+direnv allow
+```
+
+#### Build with Nix
+
+```bash
+# Build the project
+nix build
+
+# Run the built binary
+./result/bin/redis-agent-worker --help
+```
+
+#### Run without building
+
+```bash
+nix run . -- --help
+```
+
+### Option 2: Traditional Cargo Build
 
 ```bash
 cargo build --release
@@ -226,15 +259,49 @@ This ensures that:
 
 ## Development
 
-### Run tests
+### With Nix (Recommended)
+
+Enter the development shell which includes all necessary tools:
 
 ```bash
+nix develop
+```
+
+Or use direnv for automatic environment loading:
+
+```bash
+direnv allow  # If you have the .envrc file
+```
+
+Once in the development shell:
+
+```bash
+# Run all tests (requires Docker for testcontainers)
+make test
+
+# Or use cargo directly
 cargo test
+
+# Run integration tests only
+make test-integration
+
+# Run tests with verbose output
+make test-verbose
+
+# Run the test script with options
+./run_tests.sh all        # Run all tests
+./run_tests.sh integration # Run integration tests only
+./run_tests.sh verbose     # Run with debug logging
+./run_tests.sh ci          # Run CI suite (checks + tests)
 ```
 
 ### Build for production
 
 ```bash
+# With Nix (creates ./result symlink)
+nix build
+
+# Or traditional cargo
 cargo build --release
 ```
 
@@ -248,6 +315,18 @@ cargo fmt
 
 ```bash
 cargo clippy
+```
+
+### Traditional Development (without Nix)
+
+If you prefer not to use Nix, ensure you have Rust 1.70+ and Docker installed:
+
+```bash
+# Run tests
+cargo test
+
+# Build
+cargo build --release
 ```
 
 ## License

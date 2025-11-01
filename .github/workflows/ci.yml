@@ -11,8 +11,60 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  test:
-    name: Test Suite
+  nix-test:
+    name: Nix Test Suite
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Nix
+      uses: cachix/install-nix-action@v27
+      with:
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
+        nix_path: nixpkgs=channel:nixos-unstable
+
+    - name: Setup Nix cache
+      uses: cachix/cachix-action@v15
+      with:
+        name: redis-agent-worker
+        authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+        skipPush: true
+
+    - name: Check flake
+      run: nix flake check
+
+    - name: Build with Nix
+      run: nix build --print-build-logs
+
+    - name: Test binary
+      run: ./result/bin/redis-agent-worker --help
+
+    - name: Check formatting
+      run: nix develop .#ci --command cargo fmt -- --check
+
+    - name: Run clippy
+      run: nix develop .#ci --command cargo clippy --all-targets --all-features -- -D warnings
+
+    - name: Run all tests
+      run: |
+        nix develop .#ci --command bash -c "
+          echo '=== Running all tests ==='
+          cargo test --verbose
+        "
+      env:
+        RUST_LOG: info
+
+    - name: Upload binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: redis-agent-worker-nix
+        path: result/bin/redis-agent-worker
+        retention-days: 7
+
+  cargo-test:
+    name: Cargo Test Suite (Traditional)
     runs-on: ubuntu-latest
 
     steps:
@@ -56,6 +108,16 @@ jobs:
 
     - name: Run integration tests
       run: cargo test --test integration_test --verbose
+      env:
+        RUST_LOG: info
+
+    - name: Run E2E tests
+      run: cargo test --test e2e_test --verbose
+      env:
+        RUST_LOG: info
+
+    - name: Run error handling tests
+      run: cargo test --test error_handling_test --verbose
       env:
         RUST_LOG: info
 
