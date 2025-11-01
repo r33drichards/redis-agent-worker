@@ -1,33 +1,8 @@
-# Rust
-/target/
-**/*.rs.bk
-*.pdb
-# Note: Cargo.lock should be committed for applications
-# Cargo.lock
-
-# IDE
-.vscode/
-.idea/
+target/
+guest/target/
+Cargo.lock
+guest/Cargo.lock
 *.swp
 *.swo
 *~
-
-# Nix
-.direnv/
-result
-result-*
-
-# OS
 .DS_Store
-Thumbs.db
-
-# Logs
-*.log
-
-# Environment
-.env
-.env.local
-
-# Work directory
-/work/
-/tmp/

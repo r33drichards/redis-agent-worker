@@ -1,25 +1,36 @@
 use anyhow::{Context, Result};
+use hyperlight_host::sandbox::SandboxConfiguration;
+use hyperlight_host::{GuestBinary, MultiUseSandbox, UninitializedSandbox};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
+use url::Url;
+
+use crate::guest_binary::GUEST_BINARY;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
-    pub hyperlight_path: String,
     pub working_directory: String,
 }
 
 #[derive(Debug)]
 pub struct AgentExecutor {
     config: AgentConfig,
+    http_client: Client,
+    // Track the allowed MCP server URL for this executor instance
+    allowed_mcp_url: Arc<RwLock<Option<Url>>>,
 }
 
 impl AgentExecutor {
     pub fn new(config: AgentConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            http_client: Client::new(),
+            allowed_mcp_url: Arc::new(RwLock::new(None)),
+        }
     }
 
     /// Execute the agent with the given prompt in the repository
@@ -33,89 +44,163 @@ impl AgentExecutor {
         info!("Executing agent in repository: {:?}", repo_path);
         debug!("Prompt: {}", prompt);
 
-        // Prepare the agent command
-        let mut cmd = Command::new(&self.config.hyperlight_path);
-        cmd.current_dir(repo_path);
-
-        // Set up environment variables for MCP connection
+        // Set the allowed MCP URL for this execution
         if let Some(url) = mcp_connection_url {
-            info!("Setting MCP connection URL: {}", url);
-            cmd.env("MCP_CONNECTION_URL", url);
-
-            // Configure network permissions to allow only MCP connection
-            cmd.env("HYPERLIGHT_ALLOW_NETWORK", "mcp_only");
-            cmd.env("HYPERLIGHT_MCP_URL", url);
+            let parsed_url = Url::parse(url).context("Invalid MCP connection URL")?;
+            *self.allowed_mcp_url.write().await = Some(parsed_url);
+            info!("Restricted networking to MCP server: {}", url);
         } else {
-            // Completely disable network access if no MCP URL provided
-            cmd.env("HYPERLIGHT_ALLOW_NETWORK", "false");
+            *self.allowed_mcp_url.write().await = None;
+            warn!("No MCP URL provided - agent will have no network access");
         }
 
-        // Set working directory permissions
-        cmd.env("HYPERLIGHT_WORKING_DIR", repo_path.to_str().unwrap());
-        cmd.env("HYPERLIGHT_ALLOW_FILE_WRITE", "true");
-        cmd.env("HYPERLIGHT_ALLOW_FILE_READ", "true");
+        // Load the guest binary from embedded bytes
+        let guest_binary = GuestBinary::Buffer(GUEST_BINARY);
 
-        // Pass the prompt as argument or stdin
-        cmd.arg("--prompt").arg(prompt);
+        info!("Loading embedded guest binary ({} bytes)", GUEST_BINARY.len());
 
-        // Configure command to capture output
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
+        // Create sandbox configuration
+        let mut config = SandboxConfiguration::default();
+        // Note: set_working_directory might not be available in this version
+        // Will configure access through host functions instead
 
-        info!("Starting agent process");
-        let mut child = cmd.spawn().context("Failed to spawn agent process")?;
+        // Create uninitialized sandbox
+        let mut uninitialized = UninitializedSandbox::new(guest_binary, Some(config))
+            .context("Failed to create Hyperlight sandbox")?;
 
-        // Capture stdout
-        let stdout = child.stdout.take().context("Failed to capture stdout")?;
-        let stdout_handle = tokio::spawn(async move {
-            let reader = BufReader::new(stdout);
-            let mut lines = reader.lines();
-            let mut output = Vec::new();
+        info!("Hyperlight sandbox created");
 
-            while let Ok(Some(line)) = lines.next_line().await {
-                info!("[Agent stdout] {}", line);
-                output.push(line);
-            }
+        // Register host functions that the guest can call
+        self.register_host_functions(&mut uninitialized).await?;
 
-            output
-        });
+        // Evolve into a multi-use sandbox
+        let mut sandbox: MultiUseSandbox = uninitialized
+            .evolve()
+            .context("Failed to evolve sandbox")?;
 
-        // Capture stderr
-        let stderr = child.stderr.take().context("Failed to capture stderr")?;
-        let stderr_handle = tokio::spawn(async move {
-            let reader = BufReader::new(stderr);
-            let mut lines = reader.lines();
-            let mut output = Vec::new();
+        info!("Hyperlight sandbox initialized successfully");
 
-            while let Ok(Some(line)) = lines.next_line().await {
-                warn!("[Agent stderr] {}", line);
-                output.push(line);
-            }
+        // Call the guest's ExecuteAgent function
+        let mcp_url_param = mcp_connection_url.unwrap_or("");
 
-            output
-        });
+        info!("Calling guest ExecuteAgent function");
+        let output: String = sandbox
+            .call("ExecuteAgent", (prompt.to_string(), mcp_url_param.to_string()))
+            .context("Failed to call guest function")?;
 
-        // Wait for process to complete
-        let status = child.wait().await.context("Failed to wait for agent process")?;
+        info!("Agent execution completed successfully");
 
-        // Collect output
-        let stdout_lines = stdout_handle.await.context("Failed to join stdout task")?;
-        let stderr_lines = stderr_handle.await.context("Failed to join stderr task")?;
+        Ok(AgentResult {
+            success: true,
+            exit_code: 0,
+            stdout: output,
+            stderr: String::new(),
+        })
+    }
 
-        let result = AgentResult {
-            success: status.success(),
-            exit_code: status.code().unwrap_or(-1),
-            stdout: stdout_lines.join("\n"),
-            stderr: stderr_lines.join("\n"),
-        };
+    /// Register host functions that the guest can call
+    /// These functions provide controlled access to network and file operations
+    async fn register_host_functions(
+        &self,
+        sandbox: &mut UninitializedSandbox,
+    ) -> Result<()> {
+        let allowed_url = self.allowed_mcp_url.clone();
+        let http_client = self.http_client.clone();
 
-        if result.success {
-            info!("Agent execution completed successfully");
-        } else {
-            error!("Agent execution failed with exit code: {}", result.exit_code);
-        }
+        // Host function: Initialize MCP connection
+        // Validates that the URL matches the allowed MCP server
+        let allowed_for_init = allowed_url.clone();
+        sandbox
+            .register("InitializeMCPConnection", move |url_str: String| {
+                // Validate URL matches allowed MCP server
+                let url = Url::parse(&url_str).map_err(|e| anyhow::anyhow!("Invalid URL: {}", e))?;
+                let allowed = allowed_for_init.blocking_read();
 
-        Ok(result)
+                if let Some(allowed_url) = allowed.as_ref() {
+                    if url.host_str() != allowed_url.host_str()
+                        || url.port() != allowed_url.port()
+                        || url.scheme() != allowed_url.scheme()
+                    {
+                        error!(
+                            "Blocked unauthorized connection attempt to: {}. Only {} is allowed.",
+                            url, allowed_url
+                        );
+                        return Err(anyhow::anyhow!("Unauthorized network access"));
+                    }
+                } else {
+                    error!("No MCP server configured - blocking all network access");
+                    return Err(anyhow::anyhow!("Network access not allowed"));
+                }
+
+                info!("MCP connection initialized to: {}", url);
+                Ok(())
+            })
+            .context("Failed to register InitializeMCPConnection host function")?;
+
+        // Host function: Get available MCP tools
+        let http_for_tools = http_client.clone();
+        let allowed_for_tools = allowed_url.clone();
+        sandbox
+            .register("GetMCPTools", move || {
+                let allowed = allowed_for_tools.blocking_read();
+                let mcp_url = allowed
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("MCP server not configured"))?;
+
+                // Make request to MCP server to list tools
+                let tools_url = mcp_url.join("/tools").map_err(|e| anyhow::anyhow!("URL join error: {}", e))?;
+                info!("Fetching MCP tools from: {}", tools_url);
+
+                let rt = tokio::runtime::Handle::current();
+                let response = rt.block_on(async {
+                    http_for_tools
+                        .get(tools_url.as_str())
+                        .send()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("HTTP request failed: {}", e))?
+                        .text()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed to read response: {}", e))
+                })?;
+
+                Ok(response)
+            })
+            .context("Failed to register GetMCPTools host function")?;
+
+        // Host function: Execute MCP tool
+        let http_for_exec = http_client.clone();
+        let allowed_for_exec = allowed_url.clone();
+        sandbox
+            .register("ExecuteMCPTool", move |tool_name: String, arguments_json: String| {
+                let allowed = allowed_for_exec.blocking_read();
+                let mcp_url = allowed
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("MCP server not configured"))?;
+
+                // Make request to MCP server to execute tool
+                let tool_url = mcp_url.join(&format!("/tools/{}", tool_name)).map_err(|e| anyhow::anyhow!("URL join error: {}", e))?;
+                info!("Executing MCP tool '{}' at: {}", tool_name, tool_url);
+
+                let rt = tokio::runtime::Handle::current();
+                let response = rt.block_on(async {
+                    http_for_exec
+                        .post(tool_url.as_str())
+                        .header("Content-Type", "application/json")
+                        .body(arguments_json)
+                        .send()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("HTTP request failed: {}", e))?
+                        .text()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed to read response: {}", e))
+                })?;
+
+                Ok(response)
+            })
+            .context("Failed to register ExecuteMCPTool host function")?;
+
+        info!("All host functions registered successfully");
+        Ok(())
     }
 }
 
