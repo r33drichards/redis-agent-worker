@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use git2::{
-    BranchType, Cred, Direction, FetchOptions, RemoteCallbacks, Repository,
+    BranchType, Cred, FetchOptions, RemoteCallbacks, Repository,
 };
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};

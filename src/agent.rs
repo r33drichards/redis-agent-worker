@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use hyperlight_host::sandbox::SandboxConfiguration;
-use hyperlight_host::{GuestBinary, MultiUseSandbox, UninitializedSandbox};
+use hyperlight_host::{new_error, GuestBinary, MultiUseSandbox, UninitializedSandbox};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -60,7 +60,7 @@ impl AgentExecutor {
         info!("Loading embedded guest binary ({} bytes)", GUEST_BINARY.len());
 
         // Create sandbox configuration
-        let mut config = SandboxConfiguration::default();
+        let config = SandboxConfiguration::default();
         // Note: set_working_directory might not be available in this version
         // Will configure access through host functions instead
 
@@ -111,9 +111,10 @@ impl AgentExecutor {
         // Validates that the URL matches the allowed MCP server
         let allowed_for_init = allowed_url.clone();
         sandbox
-            .register("InitializeMCPConnection", move |url_str: String| {
+            .register("InitializeMCPConnection", move |url_str: String| -> hyperlight_host::Result<()> {
                 // Validate URL matches allowed MCP server
-                let url = Url::parse(&url_str).map_err(|e| anyhow::anyhow!("Invalid URL: {}", e))?;
+                let url = Url::parse(&url_str)
+                    .map_err(|e| new_error!("Invalid URL: {}", e))?;
                 let allowed = allowed_for_init.blocking_read();
 
                 if let Some(allowed_url) = allowed.as_ref() {
@@ -125,11 +126,11 @@ impl AgentExecutor {
                             "Blocked unauthorized connection attempt to: {}. Only {} is allowed.",
                             url, allowed_url
                         );
-                        return Err(anyhow::anyhow!("Unauthorized network access"));
+                        return Err(new_error!("Unauthorized network access"));
                     }
                 } else {
                     error!("No MCP server configured - blocking all network access");
-                    return Err(anyhow::anyhow!("Network access not allowed"));
+                    return Err(new_error!("Network access not allowed"));
                 }
 
                 info!("MCP connection initialized to: {}", url);
@@ -141,26 +142,30 @@ impl AgentExecutor {
         let http_for_tools = http_client.clone();
         let allowed_for_tools = allowed_url.clone();
         sandbox
-            .register("GetMCPTools", move || {
+            .register("GetMCPTools", move || -> hyperlight_host::Result<String> {
                 let allowed = allowed_for_tools.blocking_read();
                 let mcp_url = allowed
                     .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("MCP server not configured"))?;
+                    .ok_or_else(|| new_error!("MCP server not configured"))?;
 
                 // Make request to MCP server to list tools
-                let tools_url = mcp_url.join("/tools").map_err(|e| anyhow::anyhow!("URL join error: {}", e))?;
+                let tools_url = mcp_url.join("/tools")
+                    .map_err(|e| new_error!("URL join error: {}", e))?;
                 info!("Fetching MCP tools from: {}", tools_url);
 
-                let rt = tokio::runtime::Handle::current();
+                // Create a new runtime for this blocking call
+                let rt = tokio::runtime::Runtime::new()
+                    .map_err(|e| new_error!("Failed to create runtime: {}", e))?;
+
                 let response = rt.block_on(async {
                     http_for_tools
                         .get(tools_url.as_str())
                         .send()
                         .await
-                        .map_err(|e| anyhow::anyhow!("HTTP request failed: {}", e))?
+                        .map_err(|e| new_error!("HTTP request failed: {}", e))?
                         .text()
                         .await
-                        .map_err(|e| anyhow::anyhow!("Failed to read response: {}", e))
+                        .map_err(|e| new_error!("Failed to read response: {}", e))
                 })?;
 
                 Ok(response)
@@ -171,17 +176,21 @@ impl AgentExecutor {
         let http_for_exec = http_client.clone();
         let allowed_for_exec = allowed_url.clone();
         sandbox
-            .register("ExecuteMCPTool", move |tool_name: String, arguments_json: String| {
+            .register("ExecuteMCPTool", move |tool_name: String, arguments_json: String| -> hyperlight_host::Result<String> {
                 let allowed = allowed_for_exec.blocking_read();
                 let mcp_url = allowed
                     .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("MCP server not configured"))?;
+                    .ok_or_else(|| new_error!("MCP server not configured"))?;
 
                 // Make request to MCP server to execute tool
-                let tool_url = mcp_url.join(&format!("/tools/{}", tool_name)).map_err(|e| anyhow::anyhow!("URL join error: {}", e))?;
+                let tool_url = mcp_url.join(&format!("/tools/{}", tool_name))
+                    .map_err(|e| new_error!("URL join error: {}", e))?;
                 info!("Executing MCP tool '{}' at: {}", tool_name, tool_url);
 
-                let rt = tokio::runtime::Handle::current();
+                // Create a new runtime for this blocking call
+                let rt = tokio::runtime::Runtime::new()
+                    .map_err(|e| new_error!("Failed to create runtime: {}", e))?;
+
                 let response = rt.block_on(async {
                     http_for_exec
                         .post(tool_url.as_str())
@@ -189,10 +198,10 @@ impl AgentExecutor {
                         .body(arguments_json)
                         .send()
                         .await
-                        .map_err(|e| anyhow::anyhow!("HTTP request failed: {}", e))?
+                        .map_err(|e| new_error!("HTTP request failed: {}", e))?
                         .text()
                         .await
-                        .map_err(|e| anyhow::anyhow!("Failed to read response: {}", e))
+                        .map_err(|e| new_error!("Failed to read response: {}", e))
                 })?;
 
                 Ok(response)
@@ -215,5 +224,62 @@ pub struct AgentResult {
 impl AgentResult {
     pub fn is_success(&self) -> bool {
         self.success
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_agent_executor_creation() {
+        let config = AgentConfig {
+            working_directory: "/tmp/test".to_string(),
+        };
+        let executor = AgentExecutor::new(config);
+        assert!(executor.http_client.get("http://example.com").build().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_guest_binary_embedded() {
+        // Verify the guest binary is embedded and non-empty
+        assert!(!GUEST_BINARY.is_empty(), "Guest binary should be embedded");
+        assert!(
+            GUEST_BINARY.len() > 1000,
+            "Guest binary should be a reasonable size"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_execution_without_mcp() {
+        let config = AgentConfig {
+            working_directory: "/tmp/test".to_string(),
+        };
+        let executor = AgentExecutor::new(config);
+
+        // Create a temporary directory for testing
+        let temp_dir = std::env::temp_dir().join("hyperlight_test");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Execute without MCP URL (should fail gracefully)
+        let result = executor
+            .execute(&temp_dir, "test prompt", None)
+            .await;
+
+        // Clean up
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        // This should either succeed with an error message or fail with a clear error
+        // The important thing is that it doesn't panic
+        match result {
+            Ok(res) => {
+                println!("Result: {:?}", res);
+                // Agent should indicate no network access
+            }
+            Err(e) => {
+                println!("Expected error (no MCP configured): {}", e);
+                // This is expected when no MCP server is configured
+            }
+        }
     }
 }
